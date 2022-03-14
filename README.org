@@ -1,0 +1,424 @@
+* 【Transit Gateway】複数VPC環境でアウトバウンド通信を集約する環境を作ってみる
+** locals
+   #+begin_src terraform :tangle ./locals.tf
+locals {
+  project = "tgw-outbound"
+  env     = "dev"
+}
+
+locals {
+  outbound = {
+    name                 = "outbound"
+    vpc_cidr             = "10.254.0.0/24"
+    public_subnet_a_cidr = "10.254.0.0/27"
+    public_subnet_c_cidr = "10.254.0.32/27"
+    tgw_subnet_a_cidr    = "10.254.0.224/28"
+    tgw_subnet_c_cidr    = "10.254.0.240/28"
+  }
+}
+
+locals {
+  workload1 = {
+    name                  = "workload1"
+    vpc_cidr              = "10.0.0.0/22"
+    private_subnet_a_cidr = "10.0.0.0/25"
+    private_subnet_c_cidr = "10.0.0.128/25"
+    tgw_subnet_a_cidr     = "10.0.3.224/28"
+    tgw_subnet_c_cidr     = "10.0.3.240/28"
+  }
+}
+
+locals {
+  workload2 = {
+    name                  = "workload2"
+    vpc_cidr              = "10.0.4.0/22"
+    private_subnet_a_cidr = "10.0.4.0/25"
+    private_subnet_c_cidr = "10.0.4.128/25"
+    tgw_subnet_a_cidr     = "10.0.7.224/28"
+    tgw_subnet_c_cidr     = "10.0.7.240/28"
+  }
+}
+
+locals {
+  workload3 = {
+    name                  = "workload3"
+    vpc_cidr              = "10.0.8.0/22"
+    private_subnet_a_cidr = "10.0.8.0/25"
+    private_subnet_c_cidr = "10.0.8.128/25"
+    tgw_subnet_a_cidr     = "10.0.11.224/28"
+    tgw_subnet_c_cidr     = "10.0.11.240/28"
+  }
+}
+   #+end_src
+** main
+   #+begin_src terraform :tangle ./main.tf
+terraform {
+  required_version = "= 1.1.2"
+
+  required_providers {
+    aws = {
+      source  = "hashicorp/aws"
+      version = "3.74.3"
+    }
+  }
+
+  backend "s3" {
+    bucket = "kwsh-terraform-state"
+    key = "tgw-outbound/terraform.tfstate"
+    region = "ap-northeast-1"
+  }
+}
+
+provider "aws" {
+  region = "ap-northeast-1"
+  default_tags {
+    tags = {
+      Project     = local.project,
+      Environment = local.env,
+      Terraform   = true,
+    }
+  }
+}
+    #+end_src 
+** outbound
+*** vpc [3/3]
+    - [X] [[https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/vpc][aws_vpc]]
+    - [X] [[https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/internet_gateway][aws_internet_gateway]]
+    - [X] [[https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/subnet][aws_subnet]] [4/4]
+      - [X] public-subnet-a
+      - [X] public-subnet-c
+      - [X] tgw-subnet-a
+      - [X] tgw-subnet-c
+    #+begin_src terraform :tangle ./outbound_vpc.tf
+# -----
+# VPC
+# -----
+resource "aws_vpc" "outbound" {
+  cidr_block = local.outbound.vpc_cidr
+  enable_dns_support   = true
+  enable_dns_hostnames = true
+  tags = {
+    Name = "${local.outbound.name}-vpc"
+  }
+}
+
+# -----
+# Internet Gateway
+# -----
+resource "aws_internet_gateway" "outbound" {
+  vpc_id = aws_vpc.outbound.id
+
+  tags = {
+    Name = "${local.outbound.name}-igw"
+  }
+}
+
+# -----
+# Subnets
+# -----
+resource "aws_subnet" "outbound_public_a" {
+  vpc_id                   = aws_vpc.outbound.id
+  cidr_block               = local.outbound.public_subnet_a_cidr
+  availability_zone        = "ap-northeast-1a"
+  map_public_ip_on_launch  = false
+
+  tags = {
+    Name = "${local.outbound.name}-public-subnet-a"
+  }
+}
+
+resource "aws_subnet" "outbound_public_c" {
+  vpc_id                   = aws_vpc.outbound.id
+  cidr_block               = local.outbound.public_subnet_c_cidr
+  availability_zone        = "ap-northeast-1c"
+  map_public_ip_on_launch  = false
+
+  tags = {
+    Name = "${local.outbound.name}-public-subnet-c"
+  }
+}
+
+resource "aws_subnet" "outbound_tgw_a" {
+  vpc_id                   = aws_vpc.outbound.id
+  cidr_block               = local.outbound.tgw_subnet_a_cidr
+  availability_zone        = "ap-northeast-1a"
+  map_public_ip_on_launch  = false
+
+  tags = {
+    Name = "${local.outbound.name}-tgw-subnet-a"
+  }
+}
+
+resource "aws_subnet" "outbound_tgw_c" {
+  vpc_id                   = aws_vpc.outbound.id
+  cidr_block               = local.outbound.tgw_subnet_c_cidr
+  availability_zone        = "ap-northeast-1c"
+  map_public_ip_on_launch  = false
+
+  tags = {
+    Name = "${local.outbound.name}-tgw-subnet-c"
+  }
+}
+    #+end_src   
+*** natgw [2/2]
+    - [X] [[https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/nat_gateway][aws_nat_gateway]] [2/2]
+      - [X] natgw-a
+      - [X] natgw-c
+    - [X] [[https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/eip][aws_eip]] [2/2]
+      - [X] eip-a
+      - [X] eip-c
+    #+begin_src terraform :tangle ./outbound_natgw.tf
+# resource "aws_nat_gateway" "outbound_a" {
+#   allocation_id = aws_eip.outbound_a.id
+#   subnet_id = aws_subnet.outbound_public_a.id
+#   tags = {
+#     Name = "${local.outbound.name}-natgw-a"
+#   }
+#   depends_on = [aws_internet_gateway.outbound]
+# }
+#  
+# resource "aws_eip" "outbound_a" {
+#   vpc = true
+#   tags = {
+#     Name = "${local.outbound.name}-eip-a"
+#   }
+# }
+#  
+# resource "aws_nat_gateway" "outbound_c" {
+#   allocation_id = aws_eip.outbound_c.id
+#   subnet_id = aws_subnet.outbound_public_c.id
+#   tags = {
+#     Name = "${local.outbound.name}-natgw-c"
+#   }
+#   depends_on = [aws_internet_gateway.outbound]
+# }
+#  
+# resource "aws_eip" "outbound_c" {
+#   vpc = true
+#   tags = {
+#     Name = "${local.outbound.name}-eip-c"
+#   }
+# }
+    #+end_src
+** workload1
+*** vpc [4/4]
+    - [X] [[https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/vpc][aws_vpc]]
+    - [X] [[https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/subnet][aws_subnet]] [4/4]
+      - [X] private-subnet-a
+      - [X] private-subnet-c
+      - [X] tgw-subnet-a
+      - [X] tgw-subnet-c
+    #+begin_src terraform :tangle ./workload1_vpc.tf
+# -----
+# VPC
+# -----
+resource "aws_vpc" "workload1" {
+  cidr_block = local.workload1.vpc_cidr
+  enable_dns_support   = true
+  enable_dns_hostnames = true
+  tags = {
+    Name = "${local.workload1.name}-vpc"
+  }
+}
+
+# -----
+# Subnets
+# -----
+resource "aws_subnet" "workload1_private_a" {
+  vpc_id                   = aws_vpc.workload1.id
+  cidr_block               = local.workload1.private_subnet_a_cidr
+  availability_zone        = "ap-northeast-1a"
+  map_public_ip_on_launch  = false
+
+  tags = {
+    Name = "${local.workload1.name}-private-subnet-a"
+  }
+}
+
+resource "aws_subnet" "workload1_private_c" {
+  vpc_id                   = aws_vpc.workload1.id
+  cidr_block               = local.workload1.private_subnet_c_cidr
+  availability_zone        = "ap-northeast-1c"
+  map_public_ip_on_launch  = false
+
+  tags = {
+    Name = "${local.workload1.name}-private-subnet-c"
+  }
+}
+
+resource "aws_subnet" "workload1_tgw_a" {
+  vpc_id                   = aws_vpc.workload1.id
+  cidr_block               = local.workload1.tgw_subnet_a_cidr
+  availability_zone        = "ap-northeast-1a"
+  map_public_ip_on_launch  = false
+
+  tags = {
+    Name = "${local.workload1.name}-tgw-subnet-a"
+  }
+}
+
+resource "aws_subnet" "workload1_tgw_c" {
+  vpc_id                   = aws_vpc.workload1.id
+  cidr_block               = local.workload1.tgw_subnet_c_cidr
+  availability_zone        = "ap-northeast-1c"
+  map_public_ip_on_launch  = false
+
+  tags = {
+    Name = "${local.workload1.name}-tgw-subnet-c"
+  }
+}
+    #+end_src   
+** COMMENT test
+*** COMMENT instance at workload
+    - [X] [[https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/vpc_endpoint][aws_vpc_endpoint]]
+      - [X] ssm
+      - [X] ssmmessages
+      - [X] ec2messages
+    - [X] [[https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/security_group][aws_security_group]] for vpc endpoints
+    - [X] [[https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/iam_role][aws_iam_role]]
+    - [X] [[https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/iam_instance_profile][aws_iam_instance_profile]]
+    - [X] [[https://registry.terraform.io/modules/terraform-aws-modules/ec2-instance/aws/latest][ec2-instance module]]
+    #+begin_src terraform :tangle ./test_instance.tf
+# -----
+# VPC Endpoints
+# -----
+resource "aws_security_group" "workload1_vpce" {
+  name        = "${local.workload1.name}-vpce-sg"
+  vpc_id      = aws_vpc.workload1.id
+
+  ingress {
+    description      = "TLS from VPC"
+    from_port        = 443
+    to_port          = 443
+    protocol         = "tcp"
+    cidr_blocks      = ["0.0.0.0/0"]
+    ipv6_cidr_blocks = ["::/0"]
+  }
+
+  egress {
+    from_port        = 0
+    to_port          = 0
+    protocol         = "-1"
+    cidr_blocks      = ["0.0.0.0/0"]
+    ipv6_cidr_blocks = ["::/0"]
+  }
+
+  tags = {
+    Name = "${local.workload1.name}-vpce-sg"
+  }
+}
+
+# resource "aws_vpc_endpoint" "workload1_ssm" {
+#   vpc_id            = aws_vpc.workload1.id
+#   service_name      = "com.amazonaws.ap-northeast-1.ssm"
+#   vpc_endpoint_type = "Interface"
+#  
+#   subnet_ids = [
+#     aws_subnet.workload1_private_a.id,
+#     aws_subnet.workload1_private_c.id,
+#   ]
+#   security_group_ids = [
+#     aws_security_group.workload1_vpce.id
+#   ]
+#  
+#   private_dns_enabled = true
+# }
+#  
+# resource "aws_vpc_endpoint" "workload1_ssmmessages" {
+#   vpc_id            = aws_vpc.workload1.id
+#   service_name      = "com.amazonaws.ap-northeast-1.ssmmessages"
+#   vpc_endpoint_type = "Interface"
+#  
+#   subnet_ids = [
+#     aws_subnet.workload1_private_a.id,
+#     aws_subnet.workload1_private_c.id,
+#   ]
+#   security_group_ids = [
+#     aws_security_group.workload1_vpce.id
+#   ]
+#  
+#   private_dns_enabled = true
+# }
+#  
+# resource "aws_vpc_endpoint" "workload1_ec2messages" {
+#   vpc_id            = aws_vpc.workload1.id
+#   service_name      = "com.amazonaws.ap-northeast-1.ec2messages"
+#   vpc_endpoint_type = "Interface"
+#  
+#   subnet_ids = [
+#     aws_subnet.workload1_private_a.id,
+#     aws_subnet.workload1_private_c.id,
+#   ]
+#   security_group_ids = [
+#     aws_security_group.workload1_vpce.id
+#   ]
+#  
+#   private_dns_enabled = true
+# }
+
+# ----
+# IAM Role
+# ----
+resource "aws_iam_role" "test_ec2" {
+  name_prefix = "test_ec2_role_"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action = "sts:AssumeRole"
+        Effect = "Allow"
+        Principal = {
+          Service = "ec2.amazonaws.com"
+        }
+      }
+    ]
+  })
+  managed_policy_arns = [
+    "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+  ]
+}
+ 
+resource "aws_iam_instance_profile" "test_ec2" {
+  name_prefix = "test_ec2_profile_"
+  role = aws_iam_role.test_ec2.name
+}
+ 
+# -----
+# Security Group
+# -----
+resource "aws_security_group" "test_ec2" {
+  name        = "source-instance-sg"
+  vpc_id      = aws_vpc.workload1.id
+  # vpc_id      = aws_vpc.workload2.id
+ 
+  egress {
+    from_port        = 0
+    to_port          = 0
+    protocol         = "-1"
+    cidr_blocks      = ["0.0.0.0/0"]
+    ipv6_cidr_blocks = ["::/0"]
+  }
+}
+ 
+# # ---------------------------
+# # EC2 instance
+# # ---------------------------
+# module "test_ec2_instance" {
+#   source  = "terraform-aws-modules/ec2-instance/aws"
+#   version = "3.4.0"
+#  
+#   name = "test-ec2-instance"
+#  
+#   ami           = "ami-07b4f72c4c356c19d" # Amazon Linux 2
+#   instance_type = "t3.nano"
+#  
+#   vpc_security_group_ids = [
+#     aws_security_group.test_ec2.id
+#   ]
+#   subnet_id  = aws_subnet.workload1_private_a.id
+#   # subnet_id  = aws_subnet.workload2_private_a.id
+#   associate_public_ip_address = false
+#  
+#   iam_instance_profile = aws_iam_instance_profile.test_ec2.name
+# }
+    #+end_src
