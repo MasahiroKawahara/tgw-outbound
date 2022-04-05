@@ -10,7 +10,7 @@ terraform {
 
   backend "s3" {
     bucket = "kwsh-terraform-state"
-    key = "tgw-outbound/terraform.tfstate"
+    key = "tgw-centralized-outbound/terraform.tfstate"
     region = "ap-northeast-1"
   }
 }
