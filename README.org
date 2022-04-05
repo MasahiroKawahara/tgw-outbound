@@ -1,56 +1,17 @@
 * 【Transit Gateway】複数VPC環境でアウトバウンド通信を集約する環境を作ってみる
-** locals
-   #+begin_src terraform :tangle ./locals.tf
-locals {
-  project = "tgw-outbound"
-  env     = "dev"
-}
+  [[file:./img/arch.png]]
+  図: このリポジトリで作成するもの
 
-locals {
-  outbound = {
-    name                 = "outbound"
-    vpc_cidr             = "10.254.0.0/24"
-    public_subnet_a_cidr = "10.254.0.0/27"
-    public_subnet_c_cidr = "10.254.0.32/27"
-    tgw_subnet_a_cidr    = "10.254.0.224/28"
-    tgw_subnet_c_cidr    = "10.254.0.240/28"
-  }
-}
-
-locals {
-  workload1 = {
-    name                  = "workload1"
-    vpc_cidr              = "10.0.0.0/22"
-    private_subnet_a_cidr = "10.0.0.0/25"
-    private_subnet_c_cidr = "10.0.0.128/25"
-    tgw_subnet_a_cidr     = "10.0.3.224/28"
-    tgw_subnet_c_cidr     = "10.0.3.240/28"
-  }
-}
-
-locals {
-  workload2 = {
-    name                  = "workload2"
-    vpc_cidr              = "10.0.4.0/22"
-    private_subnet_a_cidr = "10.0.4.0/25"
-    private_subnet_c_cidr = "10.0.4.128/25"
-    tgw_subnet_a_cidr     = "10.0.7.224/28"
-    tgw_subnet_c_cidr     = "10.0.7.240/28"
-  }
-}
-
-locals {
-  workload3 = {
-    name                  = "workload3"
-    vpc_cidr              = "10.0.8.0/22"
-    private_subnet_a_cidr = "10.0.8.0/25"
-    private_subnet_c_cidr = "10.0.8.128/25"
-    tgw_subnet_a_cidr     = "10.0.11.224/28"
-    tgw_subnet_c_cidr     = "10.0.11.240/28"
-  }
-}
-   #+end_src
-** main
+  | file(s)                     | description                                     |
+  |-----------------------------+-------------------------------------------------|
+  | [[main.tf][main.tf]]                     | プロバイダ定義など                              |
+  | [[locals.tf][locals.tf]]                   | ローカル変数の定義                              |
+  | [[app-vpcs.tf][app-vpcs.tf]]                 | APP-VPC#1, APP-VPC#2 関連リソース作成           |
+  | [[center-vpc.tf][center-vpc.tf]]               | NAT-VPC 関連リソース作成                        |
+  | [[tgw.tf][tgw.tf]]                      | TGW 関連リソース作成                            |
+  | [[modules/app-vpc/][modules/app-vpc/]]            | APP-VPC 作成用モジュール                        |
+  | [[modules/app-tgw-attachment/][modules/app-tgw-attachment/]] | TGWアタッチメント(for APP-VPC) 作成用モジュール |
+** main.tf
    #+begin_src terraform :tangle ./main.tf
 terraform {
   required_version = "= 1.1.2"
@@ -64,7 +25,7 @@ terraform {
 
   backend "s3" {
     bucket = "kwsh-terraform-state"
-    key = "tgw-outbound/terraform.tfstate"
+    key = "tgw-centralized-outbound/terraform.tfstate"
     region = "ap-northeast-1"
   }
 }
@@ -80,223 +41,517 @@ provider "aws" {
   }
 }
     #+end_src 
-** outbound
-*** vpc [3/3]
-    | type                 | name              |
-    |----------------------+-------------------|
-    | [[https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/vpc][aws_vpc]]              | outbound          |
-    | [[https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/internet_gateway][aws_internet_gateway]] | outbound          |
-    | [[https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/subnet][aws_subnet]]           | outbound_public_a |
-    | [[https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/subnet][aws_subnet]]           | outbound_public_c |
-    | [[https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/subnet][aws_subnet]]           | outbound_tgw_a    |
-    | [[https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/subnet][aws_subnet]]           | outbound_tgw_c    |
-    #+begin_src terraform :tangle ./outbound_vpc.tf
-# -----
-# VPC
-# -----
-resource "aws_vpc" "outbound" {
-  cidr_block = local.outbound.vpc_cidr
-  enable_dns_support   = true
+** locals.tf
+   #+begin_src terraform :tangle ./locals.tf
+locals {
+  project = "nwinfra"
+  env     = "dev"
+}
+
+locals {
+  app1 = {
+    sysname               = "app1"
+    env                   = "dev"
+    vpc_cidr              = "10.0.0.0/22"
+    private_subnet_a_cidr = "10.0.0.0/25"
+    private_subnet_c_cidr = "10.0.0.128/25"
+    tgw_subnet_a_cidr     = "10.0.3.224/28"
+    tgw_subnet_c_cidr     = "10.0.3.240/28"
+  }
+}
+
+locals {
+  app2 = {
+    sysname               = "app2"
+    env                   = "dev"
+    vpc_cidr              = "10.0.4.0/22"
+    private_subnet_a_cidr = "10.0.4.0/25"
+    private_subnet_c_cidr = "10.0.4.128/25"
+    tgw_subnet_a_cidr     = "10.0.7.224/28"
+    tgw_subnet_c_cidr     = "10.0.7.240/28"
+  }
+}
+
+locals {
+  center = {
+    vpc_cidr             = "10.254.0.0/24"
+    public_subnet_a_cidr = "10.254.0.0/27"
+    public_subnet_c_cidr = "10.254.0.32/27"
+    tgw_subnet_a_cidr    = "10.254.0.224/28"
+    tgw_subnet_c_cidr    = "10.254.0.240/28"
+  }
+}
+   #+end_src
+** app-vpcs.tf
+   #+begin_src terraform :tangle ./app-vpcs.tf
+# PrefixList
+resource aws_ec2_managed_prefix_list app {
+  name           = "app-vpcs"
+  address_family = "IPv4"
+  max_entries    = 5
+}
+
+# APP VPCs
+module app1_vpc {
+  source = "./modules/app-vpc"
+
+  sysname = local.app1.sysname
+  env     = local.app1.env
+
+  vpc_cidr              = local.app1.vpc_cidr
+  private_subnet_a_cidr = local.app1.private_subnet_a_cidr
+  private_subnet_c_cidr = local.app1.private_subnet_c_cidr
+  tgw_subnet_a_cidr     = local.app1.tgw_subnet_a_cidr
+  tgw_subnet_c_cidr     = local.app1.tgw_subnet_c_cidr
+}
+resource aws_ec2_managed_prefix_list_entry app1 {
+  prefix_list_id = aws_ec2_managed_prefix_list.app.id
+  cidr           = module.app1_vpc.vpc_cidr
+  description    = "app1"
+}
+
+module app2_vpc {
+  source = "./modules/app-vpc"
+
+  sysname = local.app2.sysname
+  env     = local.app2.env
+
+  vpc_cidr              = local.app2.vpc_cidr
+  private_subnet_a_cidr = local.app2.private_subnet_a_cidr
+  private_subnet_c_cidr = local.app2.private_subnet_c_cidr
+  tgw_subnet_a_cidr     = local.app2.tgw_subnet_a_cidr
+  tgw_subnet_c_cidr     = local.app2.tgw_subnet_c_cidr
+}
+resource aws_ec2_managed_prefix_list_entry app2 {
+  prefix_list_id = aws_ec2_managed_prefix_list.app.id
+  cidr           = module.app2_vpc.vpc_cidr
+  description    = "app2"
+}
+   #+end_src
+   - [[https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/ec2_managed_prefix_list][aws_ec2_managed_prefix_list | Terraform Registry]]
+   - [[https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/ec2_managed_prefix_list_entry][aws_ec2_managed_prefix_list_entry | Terraform Registry]]
+   - [[modules/app-vpc/][app-vpc module]]
+** center-vpc.tf
+   #+begin_src terraform :tangle ./nat-vpc.tf
+# vpc 
+resource aws_vpc center {
+  cidr_block           = local.center.vpc_cidr
   enable_dns_hostnames = true
+  enable_dns_support   = true
+
   tags = {
-    Name = "${local.outbound.name}-vpc"
+    Name = "${local.project}-${local.env}-center-vpc"
   }
 }
 
-# -----
-# Internet Gateway
-# -----
-resource "aws_internet_gateway" "outbound" {
-  vpc_id = aws_vpc.outbound.id
+# igw
+resource aws_internet_gateway center {
+  vpc_id = aws_vpc.center.id
 
   tags = {
-    Name = "${local.outbound.name}-igw"
+    Name = "${local.project}-${local.env}-center-igw"
   }
 }
 
-# -----
-# Subnets
-# -----
-resource "aws_subnet" "outbound_public_a" {
-  vpc_id                   = aws_vpc.outbound.id
-  cidr_block               = local.outbound.public_subnet_a_cidr
+# public subnet a, c
+resource aws_subnet center_public_a {
+  vpc_id                   = aws_vpc.center.id
+  cidr_block               = local.center.public_subnet_a_cidr
   availability_zone        = "ap-northeast-1a"
   map_public_ip_on_launch  = false
 
   tags = {
-    Name = "${local.outbound.name}-public-subnet-a"
+    Name = "${local.project}-${local.env}-center-public-subnet-a"
   }
 }
-
-resource "aws_subnet" "outbound_public_c" {
-  vpc_id                   = aws_vpc.outbound.id
-  cidr_block               = local.outbound.public_subnet_c_cidr
+resource aws_subnet center_public_c {
+  vpc_id                   = aws_vpc.center.id
+  cidr_block               = local.center.public_subnet_c_cidr
   availability_zone        = "ap-northeast-1c"
   map_public_ip_on_launch  = false
 
   tags = {
-    Name = "${local.outbound.name}-public-subnet-c"
+    Name = "${local.project}-${local.env}-center-public-subnet-c"
   }
 }
 
-resource "aws_subnet" "outbound_tgw_a" {
-  vpc_id                   = aws_vpc.outbound.id
-  cidr_block               = local.outbound.tgw_subnet_a_cidr
+# public route table, route, route table association
+resource aws_route_table center_public {
+  vpc_id = aws_vpc.center.id
+
+  tags = {
+    Name = "${local.project}-${local.env}-center-public-rtb"
+  }
+}
+
+resource aws_route center_public_to_igw {
+  route_table_id            = aws_route_table.center_public.id
+  destination_cidr_block    = "0.0.0.0/0"
+  gateway_id                = aws_internet_gateway.center.id
+}
+
+resource aws_route_table_association center_public_a {
+  subnet_id      = aws_subnet.center_public_a.id
+  route_table_id = aws_route_table.center_public.id
+}
+resource aws_route_table_association center_public_c {
+  subnet_id      = aws_subnet.center_public_c.id
+  route_table_id = aws_route_table.center_public.id
+}
+
+# tgw subnet a, c
+resource aws_subnet center_tgw_a {
+  vpc_id                   = aws_vpc.center.id
+  cidr_block               = local.center.tgw_subnet_a_cidr
   availability_zone        = "ap-northeast-1a"
   map_public_ip_on_launch  = false
 
   tags = {
-    Name = "${local.outbound.name}-tgw-subnet-a"
+    Name = "${local.project}-${local.env}-center-tgw-subnet-a"
   }
 }
-
-resource "aws_subnet" "outbound_tgw_c" {
-  vpc_id                   = aws_vpc.outbound.id
-  cidr_block               = local.outbound.tgw_subnet_c_cidr
+resource aws_subnet center_tgw_c {
+  vpc_id                   = aws_vpc.center.id
+  cidr_block               = local.center.tgw_subnet_c_cidr
   availability_zone        = "ap-northeast-1c"
   map_public_ip_on_launch  = false
 
   tags = {
-    Name = "${local.outbound.name}-tgw-subnet-c"
+    Name = "${local.project}-${local.env}-center-tgw-subnet-c"
   }
 }
-    #+end_src   
-*** natgw [2/2]
-    | type            | name       |
-    |-----------------+------------|
-    | [[https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/nat_gateway][aws_nat_gateway]] | outbound_a |
-    | [[https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/nat_gateway][aws_nat_gateway]] | outbound_c |
-    | [[https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/eip][aws_eip]]         | outbound_a |
-    | [[https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/eip][aws_eip]]         | outbound_c |
-    #+begin_src terraform :tangle ./outbound_natgw.tf
-# resource "aws_nat_gateway" "outbound_a" {
-#   allocation_id = aws_eip.outbound_a.id
-#   subnet_id = aws_subnet.outbound_public_a.id
-#   tags = {
-#     Name = "${local.outbound.name}-natgw-a"
-#   }
-#   depends_on = [aws_internet_gateway.outbound]
-# }
-#  
-# resource "aws_eip" "outbound_a" {
-#   vpc = true
-#   tags = {
-#     Name = "${local.outbound.name}-eip-a"
-#   }
-# }
-#  
-# resource "aws_nat_gateway" "outbound_c" {
-#   allocation_id = aws_eip.outbound_c.id
-#   subnet_id = aws_subnet.outbound_public_c.id
-#   tags = {
-#     Name = "${local.outbound.name}-natgw-c"
-#   }
-#   depends_on = [aws_internet_gateway.outbound]
-# }
-#  
-# resource "aws_eip" "outbound_c" {
-#   vpc = true
-#   tags = {
-#     Name = "${local.outbound.name}-eip-c"
-#   }
-# }
+
+# EIP and NATGW a,c
+resource aws_eip center_a {
+  vpc        = true
+  depends_on = [aws_internet_gateway.center]
+
+  tags = {
+    Name = "${local.project}-${local.env}-center-eip-a"
+  }
+}
+resource aws_nat_gateway center_a {
+  allocation_id = aws_eip.center_a.id
+  subnet_id     = aws_subnet.center_public_a.id
+  depends_on    = [aws_internet_gateway.center]
+
+  tags = {
+    Name = "${local.project}-${local.env}-center-natgw-a"
+  }
+}
+
+resource aws_eip center_c {
+  vpc        = true
+  depends_on = [aws_internet_gateway.center]
+
+  tags = {
+    Name = "${local.project}-${local.env}-center-eip-c"
+  }
+}
+resource aws_nat_gateway center_c {
+  allocation_id = aws_eip.center_c.id
+  subnet_id     = aws_subnet.center_public_c.id
+ depends_on    = [aws_internet_gateway.center]
+
+  tags = {
+    Name = "${local.project}-${local.env}-center-natgw-c"
+  }
+}
+
+# tgw route table, route, route table association a/c
+resource aws_route_table center_tgw_a {
+  vpc_id = aws_vpc.center.id
+
+  tags = {
+    Name = "${local.project}-${local.env}-center-tgw-rtb-a"
+  }
+}
+resource aws_route_table_association center_tgw_a {
+  subnet_id      = aws_subnet.center_tgw_a.id
+  route_table_id = aws_route_table.center_tgw_a.id
+}
+resource aws_route center_tgw_to_natgw_a {
+  route_table_id            = aws_route_table.center_tgw_a.id
+  destination_cidr_block    = "0.0.0.0/0"
+  nat_gateway_id            = aws_nat_gateway.center_a.id
+}
+
+
+resource aws_route_table center_tgw_c {
+  vpc_id = aws_vpc.center.id
+
+  tags = {
+    Name = "${local.project}-${local.env}-center-tgw-rtb-c"
+  }
+}
+resource aws_route_table_association center_tgw_c {
+  subnet_id      = aws_subnet.center_tgw_c.id
+  route_table_id = aws_route_table.center_tgw_c.id
+}
+resource aws_route center_tgw_to_natgw_c {
+  route_table_id            = aws_route_table.center_tgw_c.id
+  destination_cidr_block    = "0.0.0.0/0"
+  nat_gateway_id            = aws_nat_gateway.center_c.id
+}
+   #+end_src
+   - [[https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/vpc][aws_vpc | Terraform Registry]]
+   - [[https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/internet_gateway][aws_internet_gateway | Terraform Registry]]
+   - [[https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/subnet][aws_subnet | Terraform Registry]]
+   - [[https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/route_table][aws_route_table | Terraform Registry]]
+   - [[https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/route][aws_route | Terraform Registry]]
+   - [[https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/route_table_association][aws_route_table_association | Terraform Registry]]
+   - [[https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/eip][aws_eip | Terraform Registry]]
+   - [[https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/nat_gateway][aws_nat_gateway | Terraform Registry]]   
+** tgw.tf
+   #+begin_src terraform :tangle ./tgw.tf
+# tgw
+resource aws_ec2_transit_gateway main {
+  auto_accept_shared_attachments  = "enable"
+  default_route_table_association = "disable"
+  default_route_table_propagation = "enable"
+
+  tags = {
+    Name = "${local.project}-${local.env}-tgw"
+  }
+}
+
+# tgw attachment (center)
+resource aws_ec2_transit_gateway_vpc_attachment center {
+  transit_gateway_id = aws_ec2_transit_gateway.main.id
+  vpc_id             = aws_vpc.center.id
+  subnet_ids         = [ aws_subnet.center_tgw_a.id, aws_subnet.center_tgw_c.id ]
+
+  transit_gateway_default_route_table_propagation = true
+  transit_gateway_default_route_table_association = false
+
+  tags = {
+    Name = "${local.project}-${local.env}-center-tgw-attachment"
+  }
+}
+
+# tgw route table association(center)
+resource aws_ec2_transit_gateway_route_table_association center {
+  transit_gateway_attachment_id  = aws_ec2_transit_gateway_vpc_attachment.center.id
+  transit_gateway_route_table_id = aws_ec2_transit_gateway.main.propagation_default_route_table_id
+}
+
+# vpc route (center)
+resource aws_route center_tgw {
+  route_table_id             = aws_route_table.center_public.id
+  destination_prefix_list_id = aws_ec2_managed_prefix_list.app.id
+  transit_gateway_id         = aws_ec2_transit_gateway.main.id
+}
+
+# tgw route table and route (app)
+resource aws_ec2_transit_gateway_route_table app {
+  transit_gateway_id = aws_ec2_transit_gateway.main.id
+
+  tags = {
+    Name = "${local.project}-${local.env}-app-tgwrtb"
+  }
+}
+resource aws_ec2_transit_gateway_route app_default {
+  destination_cidr_block         = "0.0.0.0/0"
+  transit_gateway_attachment_id  = aws_ec2_transit_gateway_vpc_attachment.center.id
+  transit_gateway_route_table_id = aws_ec2_transit_gateway_route_table.app.id
+}
+resource aws_ec2_transit_gateway_prefix_list_reference app_blackhole {
+  blackhole                      = true
+  prefix_list_id                 = aws_ec2_managed_prefix_list.app.id
+  transit_gateway_route_table_id = aws_ec2_transit_gateway_route_table.app.id
+}
+
+# tgw attachment app1 (includes tgwrtb association and vpc routing)
+module app1_tgwatt {
+  source = "./modules/app-tgw-attachment"
+
+  sysname = local.app1.sysname
+  env     = local.app1.env
+
+  vpc_id                         = module.app1_vpc.vpc_id
+  private_subnet_a_id            = module.app1_vpc.private_subnet_a_id
+  private_subnet_c_id            = module.app1_vpc.private_subnet_c_id
+  private_route_table_id         = module.app1_vpc.private_route_table_id
+  transit_gateway_id             = aws_ec2_transit_gateway.main.id
+  transit_gateway_route_table_id = aws_ec2_transit_gateway_route_table.app.id
+}
+
+# tgw attachment app2 (includes rtb association and vpc routing)
+module app2_tgwatt {
+  source = "./modules/app-tgw-attachment"
+
+  sysname = local.app2.sysname
+  env     = local.app2.env
+
+  vpc_id                         = module.app2_vpc.vpc_id
+  private_subnet_a_id            = module.app2_vpc.private_subnet_a_id
+  private_subnet_c_id            = module.app2_vpc.private_subnet_c_id
+  private_route_table_id         = module.app2_vpc.private_route_table_id
+  transit_gateway_id             = aws_ec2_transit_gateway.main.id
+  transit_gateway_route_table_id = aws_ec2_transit_gateway_route_table.app.id
+}
+   #+end_src
+   - [[https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/ec2_transit_gateway][aws_ec2_transit_gateway | Terraform Registry]]
+   - [[https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/ec2_transit_gateway_vpc_attachment][aws_ec2_transit_gateway_vpc_attachment | Terraform Registry]]
+   - [[https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/ec2_transit_gateway_route][aws_ec2_transit_gateway_route | Terraform Registry]]
+   - [[https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/ec2_transit_gateway_prefix_list_reference][aws_ec2_transit_gateway_prefix_list_reference | Terraform Registry]]
+   - [[https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/ec2_transit_gateway_route_table_association][aws_ec2_transit_gateway_route_table_association |Terraform Registry]]
+   - [[https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/route][aws_route | Terraform Registry]]
+** modules/app-vpc/
+   - *variable* [7/7]
+     + [X] sysname
+     + [X] env
+     + [X] vpc_cidr
+     + [X] private_subnet_a_cidr 
+     + [X] private_subnet_c_cidr 
+     + [X] tgw_subnet_a_cidr 
+     + [X] tgw_subnet_c_cidr 
+   - *resource* [12/12]
+     + [X] vpc
+     + [X] private subnet a
+     + [X] private subnet c
+     + [X] private route table
+     + [X] private route table association a
+     + [X] private route table association c
+     + [X] tgw subnets a
+     + [X] tgw subnets c
+     + [X] tgw route table
+     + [X] tgw route table association a
+     + [X] tgw route table association c
+     + [X] security group for test instance
+     # + [X] vpce security group
+     # + [X] vpce ssm
+     # + [X] vpce ec2messages
+     # + [X] vpce ssmmessages
+   - *output* [8/8]
+     + [X] vpc_id
+     + [X] vpc_cidr
+     + [X] private_subnet_a_id
+     + [X] private_subnet_c_id
+     + [X] private_route_table_id
+     + [X] tgw_subnet_a_id
+     + [X] tgw_subnet_c_id
+     + [X] tgw_route_table_id
+*** variables.tf
+    #+begin_src terraform :tangle ./modules/app-vpc/variables.tf
+variable sysname {}
+variable env {}
+variable vpc_cidr {}
+variable private_subnet_a_cidr {}
+variable private_subnet_c_cidr {}
+variable tgw_subnet_a_cidr {}
+variable tgw_subnet_c_cidr {}
     #+end_src
-** workload1
-*** vpc [4/4]
-    | type       | name                |
-    |------------+---------------------|
-    | [[https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/vpc][aws_vpc]]    | workload1           |
-    | [[https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/subnet][aws_subnet]] | workload1_private_a |
-    | [[https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/subnet][aws_subnet]] | workload1_private_c |
-    | [[https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/subnet][aws_subnet]] | workload1_tgw_a     |
-    | [[https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/subnet][aws_subnet]] | workload1_tgw_c     |
-    #+begin_src terraform :tangle ./workload1_vpc.tf
-# -----
-# VPC
-# -----
-resource "aws_vpc" "workload1" {
-  cidr_block = local.workload1.vpc_cidr
-  enable_dns_support   = true
+*** main.tf
+    #+begin_src terraform :tangle ./modules/app-vpc/main.tf
+# vpc
+resource aws_vpc main {
+  cidr_block = var.vpc_cidr
   enable_dns_hostnames = true
+  enable_dns_support = true
+
   tags = {
-    Name = "${local.workload1.name}-vpc"
+    Name = "${var.sysname}-${var.env}-vpc"
   }
 }
 
-# -----
-# Subnets
-# -----
-resource "aws_subnet" "workload1_private_a" {
-  vpc_id                   = aws_vpc.workload1.id
-  cidr_block               = local.workload1.private_subnet_a_cidr
+# private subnet a
+resource aws_subnet private_a {
+  vpc_id                   = aws_vpc.main.id
+  cidr_block               = var.private_subnet_a_cidr
   availability_zone        = "ap-northeast-1a"
   map_public_ip_on_launch  = false
 
   tags = {
-    Name = "${local.workload1.name}-private-subnet-a"
+    Name = "${var.sysname}-${var.env}-private-subnet-a"
   }
 }
 
-resource "aws_subnet" "workload1_private_c" {
-  vpc_id                   = aws_vpc.workload1.id
-  cidr_block               = local.workload1.private_subnet_c_cidr
+# private subnet c
+resource aws_subnet private_c {
+  vpc_id                   = aws_vpc.main.id
+  cidr_block               = var.private_subnet_c_cidr
   availability_zone        = "ap-northeast-1c"
   map_public_ip_on_launch  = false
 
   tags = {
-    Name = "${local.workload1.name}-private-subnet-c"
+    Name = "${var.sysname}-${var.env}-private-subnet-c"
   }
 }
 
-resource "aws_subnet" "workload1_tgw_a" {
-  vpc_id                   = aws_vpc.workload1.id
-  cidr_block               = local.workload1.tgw_subnet_a_cidr
+# private route table
+resource aws_route_table private {
+  vpc_id = aws_vpc.main.id
+
+  tags = {
+    Name = "${var.sysname}-${var.env}-private-rtb"
+  }
+}
+
+# private route table association a
+resource aws_route_table_association private_a {
+  subnet_id      = aws_subnet.private_a.id
+  route_table_id = aws_route_table.private.id
+}
+
+# private route table association c
+resource aws_route_table_association private_c {
+  subnet_id      = aws_subnet.private_c.id
+  route_table_id = aws_route_table.private.id
+}
+
+# tgw subnets a
+resource aws_subnet tgw_a {
+  vpc_id                   = aws_vpc.main.id
+  cidr_block               = var.tgw_subnet_a_cidr
   availability_zone        = "ap-northeast-1a"
   map_public_ip_on_launch  = false
 
   tags = {
-    Name = "${local.workload1.name}-tgw-subnet-a"
+    Name = "${var.sysname}-${var.env}-tgw-subnet-a"
   }
 }
 
-resource "aws_subnet" "workload1_tgw_c" {
-  vpc_id                   = aws_vpc.workload1.id
-  cidr_block               = local.workload1.tgw_subnet_c_cidr
+# tgw subnets c
+resource aws_subnet tgw_c {
+  vpc_id                   = aws_vpc.main.id
+  cidr_block               = var.tgw_subnet_c_cidr
   availability_zone        = "ap-northeast-1c"
   map_public_ip_on_launch  = false
 
   tags = {
-    Name = "${local.workload1.name}-tgw-subnet-c"
+    Name = "${var.sysname}-${var.env}-tgw-subnet-c"
   }
 }
-    #+end_src   
-** COMMENT test
-*** COMMENT instance at workload
-    - [X] [[https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/vpc_endpoint][aws_vpc_endpoint]]
-      - [X] ssm
-      - [X] ssmmessages
-      - [X] ec2messages
-    - [X] [[https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/security_group][aws_security_group]] for vpc endpoints
-    - [X] [[https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/iam_role][aws_iam_role]]
-    - [X] [[https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/iam_instance_profile][aws_iam_instance_profile]]
-    - [X] [[https://registry.terraform.io/modules/terraform-aws-modules/ec2-instance/aws/latest][ec2-instance module]]
-    #+begin_src terraform :tangle ./test_instance.tf
-# -----
-# VPC Endpoints
-# -----
-resource "aws_security_group" "workload1_vpce" {
-  name        = "${local.workload1.name}-vpce-sg"
-  vpc_id      = aws_vpc.workload1.id
 
-  ingress {
-    description      = "TLS from VPC"
-    from_port        = 443
-    to_port          = 443
-    protocol         = "tcp"
-    cidr_blocks      = ["0.0.0.0/0"]
-    ipv6_cidr_blocks = ["::/0"]
+# tgw route table
+resource aws_route_table tgw {
+  vpc_id = aws_vpc.main.id
+
+  tags = {
+    Name = "${var.sysname}-${var.env}-tgw-rtb"
   }
+}
 
+# tgw route table association a
+resource aws_route_table_association tgw_a {
+  subnet_id      = aws_subnet.tgw_a.id
+  route_table_id = aws_route_table.tgw.id
+}
+
+# tgw route table association c
+resource aws_route_table_association tgw_c {
+  subnet_id      = aws_subnet.tgw_c.id
+  route_table_id = aws_route_table.tgw.id
+}
+
+# security group for test instance
+resource aws_security_group test {
+  name   = "${var.sysname}-${var.env}-instance-sg"
+  vpc_id = aws_vpc.main.id
+ 
+  # ingress {}
+ 
   egress {
     from_port        = 0
     to_port          = 0
@@ -304,123 +559,198 @@ resource "aws_security_group" "workload1_vpce" {
     cidr_blocks      = ["0.0.0.0/0"]
     ipv6_cidr_blocks = ["::/0"]
   }
+ 
+  tags = {
+    Name = "${var.sysname}-${var.env}-instance-sg"
+  }
+}
+    #+end_src
+    - [[https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/vpc][aws_vpc | Terraform Registry]]
+    - [[https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/subnet][aws_subnet |Terraform Registry]]
+    - [[https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/route_table][aws_route_table | Terraform Registry]]
+    - [[https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/route_table_association][aws_route_table_association | Terraform Registry]]
+    - [[https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/security_group][aws_security_group | Terraform Registry]]
+    - [[https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/vpc_endpoint][aws_vpc_endpoint | Terraform Registry]]
+*** outputs.tf
+    #+begin_src terraform :tangle ./modules/app-vpc/outputs.tf
+output vpc_id {
+  value = aws_vpc.main.id
+}
+output vpc_cidr {
+  value = aws_vpc.main.cidr_block
+}
+output private_subnet_a_id {
+  value = aws_subnet.private_a.id
+}
+output private_subnet_c_id {
+  value = aws_subnet.private_c.id
+}
+output private_route_table_id {
+  value = aws_route_table.private.id
+}
+output tgw_subnet_a_id {
+  value = aws_subnet.tgw_a.id
+}
+output tgw_subnet_c_id {
+  value = aws_subnet.tgw_c.id
+}
+output tgw_route_table_id {
+  value = aws_route_table.tgw.id
+}
+    #+end_src
+** modules/app-tgw-attachment/
+   - *variable* [8/8]
+     + [X] sysname
+     + [X] env
+     + [X] vpc_id
+     + [X] private_subnet_a_id
+     + [X] private_subnet_c_id
+     + [X] private_route_table_id
+     + [X] transit_gateway_id
+     + [X] transit_gateway_route_table_id
+   - *resource* [3/3]
+     + [X] tgw attachment =app=
+     + [X] tgw route table association =app=
+     + [X] vpc route =app=
+   - *output* [1/1]
+     + [X] transit_gateway_attachment_id
+*** variables.tf
+    #+begin_src terraform :tangle ./modules/app-tgw-attachment/variables.tf
+variable sysname {}
+variable env {}
+variable vpc_id {}
+variable private_subnet_a_id {}
+variable private_subnet_c_id {}
+variable private_route_table_id {}
+variable transit_gateway_id {}
+variable transit_gateway_route_table_id {}
+    #+end_src
+*** main.tf
+    #+begin_src terraform :tangle ./modules/app-tgw-attachment/main.tf
+# tgw attachment
+resource aws_ec2_transit_gateway_vpc_attachment app {
+  transit_gateway_id = var.transit_gateway_id
+  vpc_id             = var.vpc_id
+  subnet_ids         = [ var.private_subnet_a_id, var.private_subnet_c_id ]
+
+  transit_gateway_default_route_table_propagation = true
+  transit_gateway_default_route_table_association = false
 
   tags = {
-    Name = "${local.workload1.name}-vpce-sg"
+    Name = "${var.sysname}-${var.env}-tgw-attachment"
   }
 }
 
-# resource "aws_vpc_endpoint" "workload1_ssm" {
-#   vpc_id            = aws_vpc.workload1.id
+# tgw route table association
+resource aws_ec2_transit_gateway_route_table_association app {
+  transit_gateway_attachment_id  = aws_ec2_transit_gateway_vpc_attachment.app.id
+  transit_gateway_route_table_id = var.transit_gateway_route_table_id
+}
+
+# vpc route
+resource aws_route app_to_tgw {
+  route_table_id            = var.private_route_table_id
+  destination_cidr_block    = "0.0.0.0/0"
+  transit_gateway_id        = var.transit_gateway_id
+}
+   #+end_src
+    - [[https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/ec2_transit_gateway_vpc_attachment][aws_ec2_transit_gateway_vpc_attachment | Terraform Registry]]
+    - [[https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/ec2_transit_gateway_route_table_association][aws_ec2_transit_gateway_route_table_association |Terraform Registry]]
+    - [[https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/route][aws_route | Terraform Registry]]
+*** outputs.tf
+    #+begin_src terraform :tangle ./modules/app-tgw-attachment/outputs.tf
+output transit_gateway_attachment_id {
+  value = aws_ec2_transit_gateway_vpc_attachment.app.id
+}
+    #+end_src
+** COMMENT not required resources
+*** vpc endpoint
+    #+begin_src terraform
+# # vpce security group
+# resource aws_security_group vpce {
+#   name   = "${var.sysname}-${var.env}-vpce-sg"
+#   vpc_id = aws_vpc.main.id
+#  
+#   ingress {
+#     from_port   = 443
+#     to_port     = 443
+#     protocol    = "tcp"
+#     cidr_blocks = [aws_vpc.main.cidr_block]
+#   }
+#  
+#   egress {
+#     from_port        = 0
+#     to_port          = 0
+#     protocol         = "-1"
+#     cidr_blocks      = ["0.0.0.0/0"]
+#     ipv6_cidr_blocks = ["::/0"]
+#   }
+#  
+#   tags = {
+#     Name = "${var.sysname}-${var.env}-vpce-sg"
+#   }
+# }
+#  
+# # vpce ssm
+# resource aws_vpc_endpoint ssm {
+#   vpc_id            = aws_vpc.main.id
 #   service_name      = "com.amazonaws.ap-northeast-1.ssm"
 #   vpc_endpoint_type = "Interface"
 #  
 #   subnet_ids = [
-#     aws_subnet.workload1_private_a.id,
-#     aws_subnet.workload1_private_c.id,
+#     aws_subnet.private_a.id,
+#     aws_subnet.private_c.id,
 #   ]
 #   security_group_ids = [
-#     aws_security_group.workload1_vpce.id
+#     aws_security_group.vpce.id
 #   ]
 #  
 #   private_dns_enabled = true
+#  
+#   tags = {
+#     Name = "${var.sysname}-${var.env}-ssm-vpce"
+#   }
 # }
 #  
-# resource "aws_vpc_endpoint" "workload1_ssmmessages" {
-#   vpc_id            = aws_vpc.workload1.id
-#   service_name      = "com.amazonaws.ap-northeast-1.ssmmessages"
-#   vpc_endpoint_type = "Interface"
-#  
-#   subnet_ids = [
-#     aws_subnet.workload1_private_a.id,
-#     aws_subnet.workload1_private_c.id,
-#   ]
-#   security_group_ids = [
-#     aws_security_group.workload1_vpce.id
-#   ]
-#  
-#   private_dns_enabled = true
-# }
-#  
-# resource "aws_vpc_endpoint" "workload1_ec2messages" {
-#   vpc_id            = aws_vpc.workload1.id
+# # vpce ec2messages
+# resource aws_vpc_endpoint ec2messages {
+#   vpc_id            = aws_vpc.main.id
 #   service_name      = "com.amazonaws.ap-northeast-1.ec2messages"
 #   vpc_endpoint_type = "Interface"
 #  
 #   subnet_ids = [
-#     aws_subnet.workload1_private_a.id,
-#     aws_subnet.workload1_private_c.id,
+#     aws_subnet.private_a.id,
+#     aws_subnet.private_c.id,
 #   ]
 #   security_group_ids = [
-#     aws_security_group.workload1_vpce.id
+#     aws_security_group.vpce.id
 #   ]
 #  
 #   private_dns_enabled = true
+#  
+#   tags = {
+#     Name = "${var.sysname}-${var.env}-ec2messages-vpce"
+#   }
 # }
-
-# ----
-# IAM Role
-# ----
-resource "aws_iam_role" "test_ec2" {
-  name_prefix = "test_ec2_role_"
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Action = "sts:AssumeRole"
-        Effect = "Allow"
-        Principal = {
-          Service = "ec2.amazonaws.com"
-        }
-      }
-    ]
-  })
-  managed_policy_arns = [
-    "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
-  ]
-}
- 
-resource "aws_iam_instance_profile" "test_ec2" {
-  name_prefix = "test_ec2_profile_"
-  role = aws_iam_role.test_ec2.name
-}
- 
-# -----
-# Security Group
-# -----
-resource "aws_security_group" "test_ec2" {
-  name        = "source-instance-sg"
-  vpc_id      = aws_vpc.workload1.id
-  # vpc_id      = aws_vpc.workload2.id
- 
-  egress {
-    from_port        = 0
-    to_port          = 0
-    protocol         = "-1"
-    cidr_blocks      = ["0.0.0.0/0"]
-    ipv6_cidr_blocks = ["::/0"]
-  }
-}
- 
-# # ---------------------------
-# # EC2 instance
-# # ---------------------------
-# module "test_ec2_instance" {
-#   source  = "terraform-aws-modules/ec2-instance/aws"
-#   version = "3.4.0"
 #  
-#   name = "test-ec2-instance"
+# # vpce ssmmessages     
+# resource aws_vpc_endpoint ssmmessages {
+#   vpc_id            = aws_vpc.main.id
+#   service_name      = "com.amazonaws.ap-northeast-1.ssmmessages"
+#   vpc_endpoint_type = "Interface"
 #  
-#   ami           = "ami-07b4f72c4c356c19d" # Amazon Linux 2
-#   instance_type = "t3.nano"
-#  
-#   vpc_security_group_ids = [
-#     aws_security_group.test_ec2.id
+#   subnet_ids = [
+#     aws_subnet.private_a.id,
+#     aws_subnet.private_c.id,
 #   ]
-#   subnet_id  = aws_subnet.workload1_private_a.id
-#   # subnet_id  = aws_subnet.workload2_private_a.id
-#   associate_public_ip_address = false
+#   security_group_ids = [
+#     aws_security_group.vpce.id
+#   ]
 #  
-#   iam_instance_profile = aws_iam_instance_profile.test_ec2.name
+#   private_dns_enabled = true
+#  
+#   tags = {
+#     Name = "${var.sysname}-${var.env}-ssmmessages-vpce"
+#   }
 # }
     #+end_src
