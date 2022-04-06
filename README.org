@@ -1,4 +1,6 @@
 * 【Transit Gateway】複数VPC環境でアウトバウンド通信を集約する環境を作ってみる
+  ブログ: [[https://dev.classmethod.jp/articles/tgw-outbound-aggregation-2022/][【AWS Transit Gateway】複数VPCのアウトバウンド通信を集約する環境を作る | DevelopersIO]]
+
   [[file:./img/arch.png]]
   図: このリポジトリで作成するもの
 
@@ -7,7 +9,7 @@
   | [[main.tf][main.tf]]                     | プロバイダ定義など                              |
   | [[locals.tf][locals.tf]]                   | ローカル変数の定義                              |
   | [[app-vpcs.tf][app-vpcs.tf]]                 | APP-VPC#1, APP-VPC#2 関連リソース作成           |
-  | [[center-vpc.tf][center-vpc.tf]]               | NAT-VPC 関連リソース作成                        |
+  | [[nat-vpc.tf][nat-vpc.tf]]                  | NAT-VPC 関連リソース作成                        |
   | [[tgw.tf][tgw.tf]]                      | TGW 関連リソース作成                            |
   | [[modules/app-vpc/][modules/app-vpc/]]            | APP-VPC 作成用モジュール                        |
   | [[modules/app-tgw-attachment/][modules/app-tgw-attachment/]] | TGWアタッチメント(for APP-VPC) 作成用モジュール |
@@ -131,7 +133,7 @@ resource aws_ec2_managed_prefix_list_entry app2 {
    - [[https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/ec2_managed_prefix_list][aws_ec2_managed_prefix_list | Terraform Registry]]
    - [[https://registry.terraform.io/providers/hashicorp/aws/latest/docs/resources/ec2_managed_prefix_list_entry][aws_ec2_managed_prefix_list_entry | Terraform Registry]]
    - [[modules/app-vpc/][app-vpc module]]
-** center-vpc.tf
+** nat-vpc.tf
    #+begin_src terraform :tangle ./nat-vpc.tf
 # vpc 
 resource aws_vpc center {
